@@ -1262,18 +1262,29 @@ export class AutotaskService {
   }
 
   private periodLabelCache: Map<number, string> | null = null;
+  /**
+   * Services.periodType labels, cached for the process.
+   *
+   * Only a successful, non-empty load is cached, and a failure propagates. An
+   * earlier version cached the map outside the try and swallowed the error: a
+   * single failed getFieldInfo (a 429 is realistic here) left an empty map
+   * cached for the process lifetime, monthlyFactor then returned null for
+   * every period type, `factor ?? 1` billed yearly lines as monthly, and the
+   * contract total overstated by up to 12x. Without the picklist there is no
+   * correct monthly figure to return, so this fails loudly rather than
+   * quietly producing wrong money.
+   */
   private async servicePeriodLabels(): Promise<Map<number, string>> {
     if (this.periodLabelCache) return this.periodLabelCache;
     const map = new Map<number, string>();
-    try {
-      const fields = await this.getFieldInfo('Services');
-      const pt = fields.find(f => f.name === 'periodType');
-      for (const pv of pt?.picklistValues || []) {
-        const v = Number((pv as any).value);
-        if (!Number.isNaN(v)) map.set(v, String((pv as any).label ?? ''));
-      }
-    } catch (error) {
-      this.logger.warn('Could not load Services.periodType picklist; monthly normalization will be skipped', error);
+    const fields = await this.getFieldInfo('Services');
+    const pt = fields.find(f => f.name === 'periodType');
+    for (const pv of pt?.picklistValues || []) {
+      const v = Number((pv as any).value);
+      if (!Number.isNaN(v)) map.set(v, String((pv as any).label ?? ''));
+    }
+    if (map.size === 0) {
+      throw new Error('Services.periodType picklist came back empty; cannot normalize contract lines to a monthly figure');
     }
     this.periodLabelCache = map;
     return map;

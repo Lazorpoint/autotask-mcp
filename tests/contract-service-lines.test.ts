@@ -392,3 +392,64 @@ describe('getContractRecurringLines price basis', () => {
       .rejects.toThrow(/429/);
   });
 });
+
+// The period-label cache used to be assigned outside its try/catch, so one
+// failed getFieldInfo cached an empty map for the process lifetime: every
+// periodType then resolved to null, `factor ?? 1` billed yearly lines as
+// monthly, and the contract total overstated by up to 12x. Flagged upstream on
+// PR #284.
+describe('servicePeriodLabels cache poisoning', () => {
+  const svcWithPicklist = (getFieldInfo: jest.Mock) => {
+    const service = new AutotaskService(mockConfig, mockLogger);
+    jest.spyOn(service, 'getFieldInfo').mockImplementation(getFieldInfo as any);
+    jest.spyOn(service, 'getContract').mockResolvedValue({ id: 1, companyID: 2 } as any);
+    jest.spyOn(service, 'getCompany').mockResolvedValue({ id: 2, companyName: 'X' } as any);
+    jest.spyOn(service, 'searchContractServiceBundles').mockResolvedValue([] as any);
+    jest.spyOn(service, 'searchContractServiceBundleUnits').mockResolvedValue([] as any);
+    jest.spyOn(service, 'searchContractServices').mockResolvedValue([{ id: 900, serviceID: 81, unitPrice: 264 }] as any);
+    // One yearly line: 1 unit, extended price 264/yr -> must normalize to 22/mo.
+    jest.spyOn(service, 'searchContractServiceUnits').mockResolvedValue([
+      { id: 1, contractServiceID: 900, serviceID: 81, units: 1, price: 264, cost: 0 },
+    ] as any);
+    jest.spyOn(service, 'getService').mockResolvedValue(
+      { id: 81, name: 'Microsoft 365 Business Premium - A|A', unitPrice: 264, periodType: 5 } as any
+    );
+    jest.spyOn(service, 'getServiceBundle').mockResolvedValue(null as any);
+    return service;
+  };
+
+  test('a failed picklist load is not cached, and the next call recovers', async () => {
+    const getFieldInfo = jest.fn()
+      .mockRejectedValueOnce(new Error('Autotask API threshold exceeded (HTTP 429)'))
+      .mockResolvedValue([PERIOD_TYPE_FIELD]);
+    const service = svcWithPicklist(getFieldInfo);
+
+    await expect(service.getContractRecurringLines({ contractID: 1, activeOn: '2026-09-08' }))
+      .rejects.toThrow(/429/);
+
+    // Second call must retry the lookup rather than reuse a poisoned empty map.
+    const result = await service.getContractRecurringLines({ contractID: 1, activeOn: '2026-09-08' });
+    expect(getFieldInfo).toHaveBeenCalledTimes(2);
+    expect(result.lines[0].periodLabel).toBe('Yearly');
+    expect(result.lines[0].monthlyTotal).toBe(22);
+    expect(result.monthlyTotal).toBe(22);
+    expect(result.monthlyTotal).not.toBe(264);
+  });
+
+  test('an empty picklist raises instead of billing yearly lines as monthly', async () => {
+    const service = svcWithPicklist(jest.fn().mockResolvedValue([{ ...PERIOD_TYPE_FIELD, picklistValues: [] }]));
+
+    await expect(service.getContractRecurringLines({ contractID: 1, activeOn: '2026-09-08' }))
+      .rejects.toThrow(/cannot normalize/i);
+  });
+
+  test('a successful picklist load is cached across calls', async () => {
+    const getFieldInfo = jest.fn().mockResolvedValue([PERIOD_TYPE_FIELD]);
+    const service = svcWithPicklist(getFieldInfo);
+
+    await service.getContractRecurringLines({ contractID: 1, activeOn: '2026-09-08' });
+    await service.getContractRecurringLines({ contractID: 1, activeOn: '2026-09-08' });
+
+    expect(getFieldInfo).toHaveBeenCalledTimes(1);
+  });
+});

@@ -227,6 +227,8 @@ export interface AutotaskContractRecurringLine {
   vendorName?: string | undefined;
   periodType?: number | undefined;
   periodLabel?: string | undefined;
+  /** How ContractServiceUnits.price was read: extended line amount (observed default), per-unit rate, or assumed extended with no catalog match. */
+  priceBasis: 'extended' | 'per-unit' | 'assumed-extended';
   units: number;
   unitPrice: number;
   unitCost: number;
@@ -247,6 +249,8 @@ export interface AutotaskContractRecurringLines {
   monthlyTotal: number;
   monthlyCost: number;
   unresolvedPeriodTypes: number[];
+  /** Lines priced without a catalog cross-check; verify these against an invoice. */
+  assumedExtendedLines: number;
 }
 
 export interface AutotaskInvoice {

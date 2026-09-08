@@ -70,6 +70,40 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+function round4(n: number): number {
+  return Math.round(n * 10000) / 10000;
+}
+
+function uniqueNumbers(values: Array<number | undefined | null>): number[] {
+  return Array.from(new Set(values.filter((v): v is number => typeof v === 'number' && !Number.isNaN(v))));
+}
+
+/** First value that is a non-empty string (`??` does not skip ""). */
+function firstNonEmpty(...values: Array<string | undefined | null>): string | undefined {
+  for (const v of values) if (typeof v === 'string' && v.trim() !== '') return v;
+  return undefined;
+}
+
+/** First value that is a positive number (`??` does not skip 0). */
+function firstPositive(...values: Array<number | undefined | null>): number | undefined {
+  for (const v of values) if (typeof v === 'number' && v > 0) return v;
+  return undefined;
+}
+
+/**
+ * Decide whether a ContractServiceUnits.price is the extended line amount or a
+ * per-unit rate by comparing it with the catalog rate. Extended is the observed
+ * default on live tenants; per-unit is accepted only when price itself matches
+ * the catalog and price/units does not.
+ */
+function classifyPriceBasis(price: number, units: number, catalogRate: number | undefined): 'extended' | 'per-unit' | 'assumed-extended' {
+  if (catalogRate == null || catalogRate <= 0 || units <= 0) return 'assumed-extended';
+  const close = (a: number, b: number) => Math.abs(a - b) <= Math.max(0.011, b * 0.005);
+  if (close(price / units, catalogRate)) return 'extended';
+  if (units > 1 && close(price, catalogRate)) return 'per-unit';
+  return 'assumed-extended';
+}
+
 function pushEq(filters: QueryFilter[], field: string, value: unknown): void {
   if (value !== undefined) {
     filters.push({ op: 'eq', field, value });
@@ -1082,18 +1116,27 @@ export class AutotaskService {
    * One call per contract for recurring-revenue reporting: every service and
    * bundle line with units active on `activeOn`, joined to the catalog for
    * names, vendors and billing period, and normalized to a monthly total.
-   * Lines whose period type cannot be resolved keep periodTotal as the monthly
-   * figure and are listed in `unresolvedPeriodTypes` rather than being guessed.
+   *
+   * Price basis. On live tenants `ContractServiceUnits.price` (and `.cost`) is
+   * the EXTENDED line amount for the period, not a per-unit rate: AIC's
+   * Business Premium row is units 11, price 254.10, catalog unitPrice 23.10.
+   * Each line is therefore checked against the catalog: if price/units matches
+   * the catalog rate the row is treated as extended (the expected case); if
+   * price itself matches the catalog rate the row is treated as per-unit; with
+   * no catalog match the row defaults to extended and says so in `priceBasis`.
+   *
+   * Catalog and vendor lookups run sequentially and are cached on the service
+   * instance; a rate-limit or auth error surfaces instead of degrading into
+   * rows with blank names. Lines whose period type cannot be resolved keep the
+   * period total as the monthly figure and appear in `unresolvedPeriodTypes`.
    */
   async getContractRecurringLines(options: { contractID: number; activeOn?: string }): Promise<AutotaskContractRecurringLines> {
     const activeOn = options.activeOn || new Date().toISOString().slice(0, 10);
-    const [contract, serviceLines, serviceUnits, bundleLines, bundleUnits] = await Promise.all([
-      this.getContract(options.contractID),
-      this.searchContractServices({ contractID: options.contractID, pageSize: 500 }),
-      this.searchContractServiceUnits({ contractID: options.contractID, activeOn, pageSize: 500 }),
-      this.searchContractServiceBundles({ contractID: options.contractID, pageSize: 500 }).catch(() => [] as AutotaskContractServiceBundle[]),
-      this.searchContractServiceBundleUnits({ contractID: options.contractID, activeOn, pageSize: 500 }).catch(() => [] as AutotaskContractServiceBundleUnit[]),
-    ]);
+    const contract = await this.getContract(options.contractID);
+    const serviceLines = await this.searchContractServices({ contractID: options.contractID, pageSize: 500 });
+    const serviceUnits = await this.searchContractServiceUnits({ contractID: options.contractID, activeOn, pageSize: 500 });
+    const bundleLines = await this.searchContractServiceBundles({ contractID: options.contractID, pageSize: 500 });
+    const bundleUnits = await this.searchContractServiceBundleUnits({ contractID: options.contractID, activeOn, pageSize: 500 });
 
     const periodLabels = await this.servicePeriodLabels();
     const unresolved = new Set<number>();
@@ -1104,27 +1147,19 @@ export class AutotaskService {
     const bundleById = new Map<number, AutotaskContractServiceBundle>();
     for (const l of bundleLines) if (l.id != null) bundleById.set(l.id, l);
 
-    const serviceIDs = Array.from(new Set(serviceUnits
-      .map(u => u.serviceID ?? serviceById.get(u.contractServiceID as number)?.serviceID)
-      .filter((x): x is number => x != null)));
-    const bundleIDs = Array.from(new Set(bundleUnits
-      .map(u => u.serviceBundleID ?? bundleById.get(u.contractServiceBundleID as number)?.serviceBundleID)
-      .filter((x): x is number => x != null)));
-
-    const catalog = new Map<number, any>();
-    await Promise.all(serviceIDs.map(async id => {
-      try { const svc = await this.getService(id); if (svc) catalog.set(id, svc); } catch { /* leave unresolved */ }
-    }));
-    const bundles = new Map<number, any>();
-    await Promise.all(bundleIDs.map(async id => {
-      try { const b = await this.getServiceBundle(id); if (b) bundles.set(id, b); } catch { /* leave unresolved */ }
-    }));
-    const vendorIDs = Array.from(new Set(Array.from(catalog.values())
-      .map(c => c.vendorCompanyID).filter((x): x is number => x != null)));
-    const vendors = new Map<number, string>();
-    await Promise.all(vendorIDs.map(async id => {
-      try { const c = await this.getCompany(id); if (c?.companyName) vendors.set(id, c.companyName); } catch { /* optional */ }
-    }));
+    // Sequential, cached lookups. No swallowed errors: a 429 or 401 here must be seen.
+    const serviceIDs = uniqueNumbers(serviceUnits.map(u => u.serviceID ?? serviceById.get(u.contractServiceID as number)?.serviceID));
+    const bundleIDs = uniqueNumbers(bundleUnits.map(u => u.serviceBundleID ?? bundleById.get(u.contractServiceBundleID as number)?.serviceBundleID));
+    for (const id of serviceIDs) {
+      if (!this.serviceCatalogCache.has(id)) this.serviceCatalogCache.set(id, await this.getService(id));
+    }
+    for (const id of bundleIDs) {
+      if (!this.bundleCatalogCache.has(id)) this.bundleCatalogCache.set(id, await this.getServiceBundle(id));
+    }
+    const vendorIDs = uniqueNumbers(serviceIDs.map(id => this.serviceCatalogCache.get(id)?.vendorCompanyID));
+    for (const id of vendorIDs) {
+      if (!this.vendorNameCache.has(id)) this.vendorNameCache.set(id, (await this.getCompany(id))?.companyName ?? undefined);
+    }
 
     const monthlyFactor = (periodType?: number): number | null => {
       if (periodType == null) return null;
@@ -1138,59 +1173,66 @@ export class AutotaskService {
       return null;
     };
 
+    const build = (
+      source: 'service' | 'bundle',
+      u: AutotaskContractServiceUnit | AutotaskContractServiceBundleUnit,
+      line: { id?: number; unitPrice?: number; unitCost?: number; invoiceDescription?: string; internalDescription?: string } | undefined,
+      cat: { name?: string; unitPrice?: number; unitCost?: number; periodType?: number; vendorCompanyID?: number } | undefined,
+      ids: { serviceID?: number; serviceBundleID?: number; lineID: number | undefined },
+    ): AutotaskContractRecurringLine => {
+      const units = Number(u.units ?? 0);
+      const catalogRate = firstPositive(line?.unitPrice, cat?.unitPrice);
+      const basis = classifyPriceBasis(Number(u.price ?? 0), units, catalogRate);
+      const periodTotal = basis === 'per-unit' ? round2(units * Number(u.price ?? 0)) : round2(Number(u.price ?? 0));
+      const unitPrice = units > 0 ? round4(periodTotal / units) : Number(u.price ?? 0);
+      const rawCost = Number(u.cost ?? 0);
+      const catalogCost = firstPositive(line?.unitCost, cat?.unitCost);
+      // Cost follows the same basis as price when present; otherwise fall back to the catalog rate.
+      const unitCost = rawCost > 0
+        ? (basis === 'per-unit' ? rawCost : (units > 0 ? round4(rawCost / units) : rawCost))
+        : (catalogCost ?? 0);
+      const factor = monthlyFactor(cat?.periodType);
+      if (factor === null && cat?.periodType != null) unresolved.add(cat.periodType);
+      const fallbackName = source === 'service' ? `Service ${ids.serviceID}` : `Bundle ${ids.serviceBundleID}`;
+      return {
+        source,
+        lineID: ids.lineID,
+        ...(ids.serviceID != null ? { serviceID: ids.serviceID } : {}),
+        ...(ids.serviceBundleID != null ? { serviceBundleID: ids.serviceBundleID } : {}),
+        name: firstNonEmpty(cat?.name, line?.invoiceDescription, line?.internalDescription) ?? fallbackName,
+        vendorCompanyID: cat?.vendorCompanyID,
+        vendorName: cat?.vendorCompanyID != null ? this.vendorNameCache.get(cat.vendorCompanyID) : undefined,
+        periodType: cat?.periodType,
+        periodLabel: cat?.periodType != null ? periodLabels.get(cat.periodType) : undefined,
+        priceBasis: basis,
+        units,
+        unitPrice,
+        unitCost,
+        periodTotal,
+        monthlyTotal: round2(periodTotal * (factor ?? 1)),
+        monthlyCost: round2(units * unitCost * (factor ?? 1)),
+        startDate: u.startDate,
+        endDate: u.endDate,
+      };
+    };
+
     for (const u of serviceUnits) {
       const line = serviceById.get(u.contractServiceID as number);
       const serviceID = u.serviceID ?? line?.serviceID;
-      const svc = serviceID != null ? catalog.get(serviceID) : undefined;
-      const units = Number(u.units ?? 0);
-      const unitPrice = Number(u.price ?? line?.unitPrice ?? svc?.unitPrice ?? 0);
-      const unitCost = Number(u.cost ?? line?.unitCost ?? svc?.unitCost ?? 0);
-      const factor = monthlyFactor(svc?.periodType);
-      if (factor === null && svc?.periodType != null) unresolved.add(svc.periodType);
-      const periodTotal = round2(units * unitPrice);
-      lines.push({
-        source: 'service',
-        lineID: line?.id ?? u.contractServiceID,
-        serviceID,
-        name: svc?.name ?? line?.invoiceDescription ?? `Service ${serviceID}`,
-        vendorCompanyID: svc?.vendorCompanyID,
-        vendorName: svc?.vendorCompanyID != null ? vendors.get(svc.vendorCompanyID) : undefined,
-        periodType: svc?.periodType,
-        periodLabel: svc?.periodType != null ? periodLabels.get(svc.periodType) : undefined,
-        units, unitPrice, unitCost, periodTotal,
-        monthlyTotal: round2(periodTotal * (factor ?? 1)),
-        monthlyCost: round2(units * unitCost * (factor ?? 1)),
-        startDate: u.startDate, endDate: u.endDate,
-      });
+      const cat = serviceID != null ? this.serviceCatalogCache.get(serviceID) ?? undefined : undefined;
+      lines.push(build('service', u, line, cat, { serviceID, lineID: line?.id ?? u.contractServiceID }));
     }
     for (const u of bundleUnits) {
       const line = bundleById.get(u.contractServiceBundleID as number);
       const serviceBundleID = u.serviceBundleID ?? line?.serviceBundleID;
-      const b = serviceBundleID != null ? bundles.get(serviceBundleID) : undefined;
-      const units = Number(u.units ?? 0);
-      const unitPrice = Number(u.price ?? line?.unitPrice ?? b?.unitPrice ?? 0);
-      const unitCost = Number(u.cost ?? line?.unitCost ?? b?.unitCost ?? 0);
-      const factor = monthlyFactor(b?.periodType);
-      if (factor === null && b?.periodType != null) unresolved.add(b.periodType);
-      const periodTotal = round2(units * unitPrice);
-      lines.push({
-        source: 'bundle',
-        lineID: line?.id ?? u.contractServiceBundleID,
-        serviceBundleID,
-        name: b?.name ?? line?.invoiceDescription ?? `Bundle ${serviceBundleID}`,
-        periodType: b?.periodType,
-        periodLabel: b?.periodType != null ? periodLabels.get(b.periodType) : undefined,
-        units, unitPrice, unitCost, periodTotal,
-        monthlyTotal: round2(periodTotal * (factor ?? 1)),
-        monthlyCost: round2(units * unitCost * (factor ?? 1)),
-        startDate: u.startDate, endDate: u.endDate,
-      });
+      const cat = serviceBundleID != null ? this.bundleCatalogCache.get(serviceBundleID) ?? undefined : undefined;
+      lines.push(build('bundle', u, line, cat, { serviceBundleID, lineID: line?.id ?? u.contractServiceBundleID }));
     }
 
     lines.sort((a, b) => b.monthlyTotal - a.monthlyTotal || a.name.localeCompare(b.name));
     let companyName: string | undefined;
     if (contract?.companyID != null) {
-      try { companyName = (await this.getCompany(contract.companyID))?.companyName; } catch { /* optional */ }
+      companyName = (await this.getCompany(contract.companyID))?.companyName ?? undefined;
     }
     return {
       contractID: options.contractID,
@@ -1202,8 +1244,13 @@ export class AutotaskService {
       monthlyTotal: round2(lines.reduce((a, l) => a + l.monthlyTotal, 0)),
       monthlyCost: round2(lines.reduce((a, l) => a + l.monthlyCost, 0)),
       unresolvedPeriodTypes: Array.from(unresolved).sort((a, b) => a - b),
+      assumedExtendedLines: lines.filter(l => l.priceBasis === 'assumed-extended').length,
     };
   }
+
+  private serviceCatalogCache = new Map<number, any>();
+  private bundleCatalogCache = new Map<number, any>();
+  private vendorNameCache = new Map<number, string | undefined>();
 
   private unitDateFilters(contractID: number, activeOn?: string): QueryFilter[] {
     const day = activeOn || new Date().toISOString().slice(0, 10);

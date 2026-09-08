@@ -40,6 +40,7 @@ export interface AutotaskTicket {
   companyID?: number;
   contactID?: number;
   assignedResourceID?: number;
+  assignedResourceRoleID?: number;
   title?: string;
   description?: string;
   status?: number;
@@ -180,6 +181,7 @@ export interface AutotaskTask {
   title?: string;
   description?: string;
   assignedResourceID?: number;
+  assignedResourceRoleID?: number;
   status?: number;
   priority?: number;
   startDate?: string;

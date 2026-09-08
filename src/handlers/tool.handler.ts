@@ -800,6 +800,24 @@ export class AutotaskToolHandler {
   }
 
   /**
+   * Resolve the roleID for a ticket- or task-scoped time entry from the
+   * parent's assignedResourceRoleID. Used by autotask_create_time_entry when
+   * the caller didn't supply an explicit roleID.
+   */
+  private async resolveParentRoleID(kind: 'Ticket' | 'Task', id: number): Promise<number> {
+    const parent = kind === 'Ticket'
+      ? await this.autotaskService.getTicket(id)
+      : await this.autotaskService.getTask(id);
+    if (parent === null) {
+      throw new Error(`No ${kind} found matching "${id}"`);
+    }
+    if (parent.assignedResourceRoleID === undefined) {
+      throw new Error(`No "assignedResourceRoleID" found for ${kind} "${id}" and no roleID provided`);
+    }
+    return parent.assignedResourceRoleID;
+  }
+
+  /**
    * Dispatch table: maps tool names to handler functions
    */
   private getDispatchTable(): Map<string, (args: any) => Promise<{ result: any; message: string }>> {
@@ -997,6 +1015,14 @@ export class AutotaskToolHandler {
             }
             a.internalBillingCodeID = billingCode.id;
             delete a.category;
+          }
+        } else {
+          // for non-regular time entries a roleID must be set
+          // this defaults to ticketID.assignedResourceroleID or taskID.assignedResourceroleID but may be overridden
+          if (!a.roleID) {
+            a.roleID = a.taskID
+              ? await this.resolveParentRoleID('Task', a.taskID)
+              : await this.resolveParentRoleID('Ticket', a.ticketID);
           }
         }
         const id = await s.createTimeEntry(a); return { result: id, message: `Successfully created time entry with ID: ${id}` };

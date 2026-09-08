@@ -158,6 +158,101 @@ export interface AutotaskContract {
   [key: string]: any;
 }
 
+/** A service line on a Contract (Autotask entity ContractServices). */
+export interface AutotaskContractService {
+  id?: number;
+  contractID?: number;
+  serviceID?: number;
+  unitPrice?: number;
+  unitCost?: number;
+  internalCurrencyUnitPrice?: number;
+  invoiceDescription?: string;
+  internalDescription?: string;
+  quoteItemID?: number;
+  [key: string]: any;
+}
+
+/** Billed quantity for a contract service line over a date range (ContractServiceUnits). */
+export interface AutotaskContractServiceUnit {
+  id?: number;
+  contractID?: number;
+  contractServiceID?: number;
+  serviceID?: number;
+  units?: number;
+  price?: number;
+  cost?: number;
+  internalCurrencyPrice?: number;
+  startDate?: string;
+  endDate?: string;
+  approveAndPostDate?: string;
+  vendorCompanyID?: number;
+  [key: string]: any;
+}
+
+/** A service-bundle line on a Contract (ContractServiceBundles). */
+export interface AutotaskContractServiceBundle {
+  id?: number;
+  contractID?: number;
+  serviceBundleID?: number;
+  unitPrice?: number;
+  unitCost?: number;
+  internalCurrencyUnitPrice?: number;
+  invoiceDescription?: string;
+  internalDescription?: string;
+  [key: string]: any;
+}
+
+/** Billed quantity for a contract bundle line over a date range (ContractServiceBundleUnits). */
+export interface AutotaskContractServiceBundleUnit {
+  id?: number;
+  contractID?: number;
+  contractServiceBundleID?: number;
+  serviceBundleID?: number;
+  units?: number;
+  price?: number;
+  cost?: number;
+  startDate?: string;
+  endDate?: string;
+  [key: string]: any;
+}
+
+/** One recurring line, normalized to a monthly figure, as returned by getContractRecurringLines(). */
+export interface AutotaskContractRecurringLine {
+  source: 'service' | 'bundle';
+  lineID: number | undefined;
+  serviceID?: number | undefined;
+  serviceBundleID?: number | undefined;
+  name: string;
+  vendorCompanyID?: number | undefined;
+  vendorName?: string | undefined;
+  periodType?: number | undefined;
+  periodLabel?: string | undefined;
+  /** How ContractServiceUnits.price was read: extended line amount (observed default), per-unit rate, or assumed extended with no catalog match. */
+  priceBasis: 'extended' | 'per-unit' | 'assumed-extended';
+  units: number;
+  unitPrice: number;
+  unitCost: number;
+  periodTotal: number;
+  monthlyTotal: number;
+  monthlyCost: number;
+  startDate?: string | undefined;
+  endDate?: string | undefined;
+}
+
+export interface AutotaskContractRecurringLines {
+  contractID: number;
+  contractName?: string | undefined;
+  companyID?: number | undefined;
+  companyName?: string | undefined;
+  activeOn: string;
+  lines: AutotaskContractRecurringLine[];
+  monthlyTotal: number;
+  monthlyCost: number;
+  unresolvedPeriodTypes: number[];
+  /** Lines priced without a catalog cross-check; verify these against an invoice. */
+  assumedExtendedLines: number;
+}
+
 export interface AutotaskInvoice {
   id?: number;
   companyID?: number;

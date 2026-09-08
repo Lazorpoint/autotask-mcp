@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Added
+
+- **Contract service lines and billed units (read-only)**. Five tools close the gap between a contract header and what is actually invoiced:
+  - `autotask_search_contract_services` / `autotask_search_contract_service_bundles` — the service and bundle line items on a contract, with contract-specific unit price.
+  - `autotask_search_contract_service_units` / `autotask_search_contract_service_bundle_units` — the billed quantity and price per line over a date range, defaulting to rows active today.
+  - `autotask_get_contract_recurring_lines` — one-call roll-up per contract: every active line joined to the catalog (service name, vendor, billing period) and normalized to a monthly total, for MRR reporting and licensing reconciliation. Period types that cannot be resolved from the `Services.periodType` picklist are reported in `unresolvedPeriodTypes` instead of guessed.
+
 ### Changed
 
 - **Migrated from `@modelcontextprotocol/sdk` v1 to the v2 SDK (`@modelcontextprotocol/server` + `@modelcontextprotocol/node` 2.0.0-beta.5) with dual-era serving.** All three entrypoints now consume one shared per-request server factory (`AutotaskMcpServer.requestFactory()`), so the tool/resource/prompt surface can never drift between protocol eras:

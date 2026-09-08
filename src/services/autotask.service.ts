@@ -9,6 +9,12 @@
 import { resolveAutotaskApiUrl } from '../utils/config';
 import { AutotaskHttpClient, QueryFilter } from './autotask-http';
 import {
+  AutotaskContractService,
+  AutotaskContractServiceUnit,
+  AutotaskContractServiceBundle,
+  AutotaskContractServiceBundleUnit,
+  AutotaskContractRecurringLine,
+  AutotaskContractRecurringLines,
   AutotaskCompany,
   AutotaskContact,
   AutotaskTicket,
@@ -60,6 +66,44 @@ export const MATCH_ALL: QueryFilter[] = [{ op: 'gte', field: 'id', value: 0 }];
  * `if (options.X !== undefined) filters.push({ op: 'eq', field: 'X', value: options.X })`
  * pattern that was previously duplicated across every search method.
  */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+function round4(n: number): number {
+  return Math.round(n * 10000) / 10000;
+}
+
+function uniqueNumbers(values: Array<number | undefined | null>): number[] {
+  return Array.from(new Set(values.filter((v): v is number => typeof v === 'number' && !Number.isNaN(v))));
+}
+
+/** First value that is a non-empty string (`??` does not skip ""). */
+function firstNonEmpty(...values: Array<string | undefined | null>): string | undefined {
+  for (const v of values) if (typeof v === 'string' && v.trim() !== '') return v;
+  return undefined;
+}
+
+/** First value that is a positive number (`??` does not skip 0). */
+function firstPositive(...values: Array<number | undefined | null>): number | undefined {
+  for (const v of values) if (typeof v === 'number' && v > 0) return v;
+  return undefined;
+}
+
+/**
+ * Decide whether a ContractServiceUnits.price is the extended line amount or a
+ * per-unit rate by comparing it with the catalog rate. Extended is the observed
+ * default on live tenants; per-unit is accepted only when price itself matches
+ * the catalog and price/units does not.
+ */
+function classifyPriceBasis(price: number, units: number, catalogRate: number | undefined): 'extended' | 'per-unit' | 'assumed-extended' {
+  if (catalogRate == null || catalogRate <= 0 || units <= 0) return 'assumed-extended';
+  const close = (a: number, b: number) => Math.abs(a - b) <= Math.max(0.011, b * 0.005);
+  if (close(price / units, catalogRate)) return 'extended';
+  if (units > 1 && close(price, catalogRate)) return 'per-unit';
+  return 'assumed-extended';
+}
+
 function pushEq(filters: QueryFilter[], field: string, value: unknown): void {
   if (value !== undefined) {
     filters.push({ op: 'eq', field, value });
@@ -1006,6 +1050,244 @@ export class AutotaskService {
       this.logger.error('Failed to search contracts:', error);
       throw error;
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Contract service lines and billed units (read-only)
+  // ---------------------------------------------------------------------------
+
+  /** Service lines on a contract (ContractServices). */
+  async searchContractServices(options: { contractID: number; pageSize?: number }): Promise<AutotaskContractService[]> {
+    const http = await this.ensureClient();
+    try {
+      const filters: QueryFilter[] = [{ op: 'eq', field: 'contractID', value: options.contractID }];
+      const pageSize = Math.min(options.pageSize || 100, 500);
+      return await http.query<AutotaskContractService>('ContractServices', filters, { maxRecords: pageSize });
+    } catch (error) {
+      this.logger.error(`Failed to search contract services for contract ${options.contractID}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Billed unit rows for a contract (ContractServiceUnits). With `activeOn`
+   * (ISO date, default today) only rows whose date range covers that day are
+   * returned, which is the quantity currently being invoiced.
+   */
+  async searchContractServiceUnits(options: { contractID: number; activeOn?: string; pageSize?: number }): Promise<AutotaskContractServiceUnit[]> {
+    const http = await this.ensureClient();
+    try {
+      const filters = this.unitDateFilters(options.contractID, options.activeOn);
+      const pageSize = Math.min(options.pageSize || 200, 500);
+      return await http.query<AutotaskContractServiceUnit>('ContractServiceUnits', filters, { maxRecords: pageSize });
+    } catch (error) {
+      this.logger.error(`Failed to search contract service units for contract ${options.contractID}:`, error);
+      throw error;
+    }
+  }
+
+  /** Service-bundle lines on a contract (ContractServiceBundles). */
+  async searchContractServiceBundles(options: { contractID: number; pageSize?: number }): Promise<AutotaskContractServiceBundle[]> {
+    const http = await this.ensureClient();
+    try {
+      const filters: QueryFilter[] = [{ op: 'eq', field: 'contractID', value: options.contractID }];
+      const pageSize = Math.min(options.pageSize || 100, 500);
+      return await http.query<AutotaskContractServiceBundle>('ContractServiceBundles', filters, { maxRecords: pageSize });
+    } catch (error) {
+      this.logger.error(`Failed to search contract service bundles for contract ${options.contractID}:`, error);
+      throw error;
+    }
+  }
+
+  /** Billed unit rows for bundle lines (ContractServiceBundleUnits), same date semantics as service units. */
+  async searchContractServiceBundleUnits(options: { contractID: number; activeOn?: string; pageSize?: number }): Promise<AutotaskContractServiceBundleUnit[]> {
+    const http = await this.ensureClient();
+    try {
+      const filters = this.unitDateFilters(options.contractID, options.activeOn);
+      const pageSize = Math.min(options.pageSize || 200, 500);
+      return await http.query<AutotaskContractServiceBundleUnit>('ContractServiceBundleUnits', filters, { maxRecords: pageSize });
+    } catch (error) {
+      this.logger.error(`Failed to search contract service bundle units for contract ${options.contractID}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * One call per contract for recurring-revenue reporting: every service and
+   * bundle line with units active on `activeOn`, joined to the catalog for
+   * names, vendors and billing period, and normalized to a monthly total.
+   *
+   * Price basis. On live tenants `ContractServiceUnits.price` (and `.cost`) is
+   * the EXTENDED line amount for the period, not a per-unit rate: AIC's
+   * Business Premium row is units 11, price 254.10, catalog unitPrice 23.10.
+   * Each line is therefore checked against the catalog: if price/units matches
+   * the catalog rate the row is treated as extended (the expected case); if
+   * price itself matches the catalog rate the row is treated as per-unit; with
+   * no catalog match the row defaults to extended and says so in `priceBasis`.
+   *
+   * Catalog and vendor lookups run sequentially and are cached on the service
+   * instance; a rate-limit or auth error surfaces instead of degrading into
+   * rows with blank names. Lines whose period type cannot be resolved keep the
+   * period total as the monthly figure and appear in `unresolvedPeriodTypes`.
+   */
+  async getContractRecurringLines(options: { contractID: number; activeOn?: string }): Promise<AutotaskContractRecurringLines> {
+    const activeOn = options.activeOn || new Date().toISOString().slice(0, 10);
+    const contract = await this.getContract(options.contractID);
+    const serviceLines = await this.searchContractServices({ contractID: options.contractID, pageSize: 500 });
+    const serviceUnits = await this.searchContractServiceUnits({ contractID: options.contractID, activeOn, pageSize: 500 });
+    const bundleLines = await this.searchContractServiceBundles({ contractID: options.contractID, pageSize: 500 });
+    const bundleUnits = await this.searchContractServiceBundleUnits({ contractID: options.contractID, activeOn, pageSize: 500 });
+
+    const periodLabels = await this.servicePeriodLabels();
+    const unresolved = new Set<number>();
+    const lines: AutotaskContractRecurringLine[] = [];
+
+    const serviceById = new Map<number, AutotaskContractService>();
+    for (const l of serviceLines) if (l.id != null) serviceById.set(l.id, l);
+    const bundleById = new Map<number, AutotaskContractServiceBundle>();
+    for (const l of bundleLines) if (l.id != null) bundleById.set(l.id, l);
+
+    // Sequential, cached lookups. No swallowed errors: a 429 or 401 here must be seen.
+    const serviceIDs = uniqueNumbers(serviceUnits.map(u => u.serviceID ?? serviceById.get(u.contractServiceID as number)?.serviceID));
+    const bundleIDs = uniqueNumbers(bundleUnits.map(u => u.serviceBundleID ?? bundleById.get(u.contractServiceBundleID as number)?.serviceBundleID));
+    for (const id of serviceIDs) {
+      if (!this.serviceCatalogCache.has(id)) this.serviceCatalogCache.set(id, await this.getService(id));
+    }
+    for (const id of bundleIDs) {
+      if (!this.bundleCatalogCache.has(id)) this.bundleCatalogCache.set(id, await this.getServiceBundle(id));
+    }
+    const vendorIDs = uniqueNumbers(serviceIDs.map(id => this.serviceCatalogCache.get(id)?.vendorCompanyID));
+    for (const id of vendorIDs) {
+      if (!this.vendorNameCache.has(id)) this.vendorNameCache.set(id, (await this.getCompany(id))?.companyName ?? undefined);
+    }
+
+    const monthlyFactor = (periodType?: number): number | null => {
+      if (periodType == null) return null;
+      const label = (periodLabels.get(periodType) || '').toLowerCase();
+      if (/semi/.test(label)) return 1 / 6;
+      if (/quarter/.test(label)) return 1 / 3;
+      if (/annual|year/.test(label)) return 1 / 12;
+      if (/month/.test(label)) return 1;
+      if (/week/.test(label)) return 52 / 12;
+      if (/one[- ]?time/.test(label)) return 0;
+      return null;
+    };
+
+    const build = (
+      source: 'service' | 'bundle',
+      u: AutotaskContractServiceUnit | AutotaskContractServiceBundleUnit,
+      line: { id?: number; unitPrice?: number; unitCost?: number; invoiceDescription?: string; internalDescription?: string } | undefined,
+      cat: { name?: string; unitPrice?: number; unitCost?: number; periodType?: number; vendorCompanyID?: number } | undefined,
+      ids: { serviceID?: number | undefined; serviceBundleID?: number | undefined; lineID: number | undefined },
+    ): AutotaskContractRecurringLine => {
+      const units = Number(u.units ?? 0);
+      const catalogRate = firstPositive(line?.unitPrice, cat?.unitPrice);
+      const basis = classifyPriceBasis(Number(u.price ?? 0), units, catalogRate);
+      const periodTotal = basis === 'per-unit' ? round2(units * Number(u.price ?? 0)) : round2(Number(u.price ?? 0));
+      const unitPrice = units > 0 ? round4(periodTotal / units) : Number(u.price ?? 0);
+      const rawCost = Number(u.cost ?? 0);
+      const catalogCost = firstPositive(line?.unitCost, cat?.unitCost);
+      // Cost follows the same basis as price when present; otherwise fall back to the catalog rate.
+      const unitCost = rawCost > 0
+        ? (basis === 'per-unit' ? rawCost : (units > 0 ? round4(rawCost / units) : rawCost))
+        : (catalogCost ?? 0);
+      const factor = monthlyFactor(cat?.periodType);
+      if (factor === null && cat?.periodType != null) unresolved.add(cat.periodType);
+      const fallbackName = source === 'service' ? `Service ${ids.serviceID}` : `Bundle ${ids.serviceBundleID}`;
+      return {
+        source,
+        lineID: ids.lineID,
+        ...(ids.serviceID != null ? { serviceID: ids.serviceID } : {}),
+        ...(ids.serviceBundleID != null ? { serviceBundleID: ids.serviceBundleID } : {}),
+        name: firstNonEmpty(cat?.name, line?.invoiceDescription, line?.internalDescription) ?? fallbackName,
+        vendorCompanyID: cat?.vendorCompanyID,
+        vendorName: cat?.vendorCompanyID != null ? this.vendorNameCache.get(cat.vendorCompanyID) : undefined,
+        periodType: cat?.periodType,
+        periodLabel: cat?.periodType != null ? periodLabels.get(cat.periodType) : undefined,
+        priceBasis: basis,
+        units,
+        unitPrice,
+        unitCost,
+        periodTotal,
+        monthlyTotal: round2(periodTotal * (factor ?? 1)),
+        monthlyCost: round2(units * unitCost * (factor ?? 1)),
+        startDate: u.startDate,
+        endDate: u.endDate,
+      };
+    };
+
+    for (const u of serviceUnits) {
+      const line = serviceById.get(u.contractServiceID as number);
+      const serviceID = u.serviceID ?? line?.serviceID;
+      const cat = serviceID != null ? this.serviceCatalogCache.get(serviceID) ?? undefined : undefined;
+      lines.push(build('service', u, line, cat, { serviceID, lineID: line?.id ?? u.contractServiceID }));
+    }
+    for (const u of bundleUnits) {
+      const line = bundleById.get(u.contractServiceBundleID as number);
+      const serviceBundleID = u.serviceBundleID ?? line?.serviceBundleID;
+      const cat = serviceBundleID != null ? this.bundleCatalogCache.get(serviceBundleID) ?? undefined : undefined;
+      lines.push(build('bundle', u, line, cat, { serviceBundleID, lineID: line?.id ?? u.contractServiceBundleID }));
+    }
+
+    lines.sort((a, b) => b.monthlyTotal - a.monthlyTotal || a.name.localeCompare(b.name));
+    let companyName: string | undefined;
+    if (contract?.companyID != null) {
+      companyName = (await this.getCompany(contract.companyID))?.companyName ?? undefined;
+    }
+    return {
+      contractID: options.contractID,
+      contractName: contract?.contractName,
+      companyID: contract?.companyID,
+      companyName,
+      activeOn,
+      lines,
+      monthlyTotal: round2(lines.reduce((a, l) => a + l.monthlyTotal, 0)),
+      monthlyCost: round2(lines.reduce((a, l) => a + l.monthlyCost, 0)),
+      unresolvedPeriodTypes: Array.from(unresolved).sort((a, b) => a - b),
+      assumedExtendedLines: lines.filter(l => l.priceBasis === 'assumed-extended').length,
+    };
+  }
+
+  private serviceCatalogCache = new Map<number, any>();
+  private bundleCatalogCache = new Map<number, any>();
+  private vendorNameCache = new Map<number, string | undefined>();
+
+  private unitDateFilters(contractID: number, activeOn?: string): QueryFilter[] {
+    const day = activeOn || new Date().toISOString().slice(0, 10);
+    return [
+      { op: 'eq', field: 'contractID', value: contractID },
+      { op: 'lte', field: 'startDate', value: `${day}T23:59:59` },
+      { op: 'gte', field: 'endDate', value: `${day}T00:00:00` },
+    ];
+  }
+
+  private periodLabelCache: Map<number, string> | null = null;
+  /**
+   * Services.periodType labels, cached for the process.
+   *
+   * Only a successful, non-empty load is cached, and a failure propagates. An
+   * earlier version cached the map outside the try and swallowed the error: a
+   * single failed getFieldInfo (a 429 is realistic here) left an empty map
+   * cached for the process lifetime, monthlyFactor then returned null for
+   * every period type, `factor ?? 1` billed yearly lines as monthly, and the
+   * contract total overstated by up to 12x. Without the picklist there is no
+   * correct monthly figure to return, so this fails loudly rather than
+   * quietly producing wrong money.
+   */
+  private async servicePeriodLabels(): Promise<Map<number, string>> {
+    if (this.periodLabelCache) return this.periodLabelCache;
+    const map = new Map<number, string>();
+    const fields = await this.getFieldInfo('Services');
+    const pt = fields.find(f => f.name === 'periodType');
+    for (const pv of pt?.picklistValues || []) {
+      const v = Number((pv as any).value);
+      if (!Number.isNaN(v)) map.set(v, String((pv as any).label ?? ''));
+    }
+    if (map.size === 0) {
+      throw new Error('Services.periodType picklist came back empty; cannot normalize contract lines to a monthly figure');
+    }
+    this.periodLabelCache = map;
+    return map;
   }
 
   /**

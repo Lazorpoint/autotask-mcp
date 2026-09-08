@@ -185,7 +185,7 @@ export interface AutotaskContractServiceUnit {
   startDate?: string;
   endDate?: string;
   approveAndPostDate?: string;
-  vendorAccountID?: number;
+  vendorCompanyID?: number;
   [key: string]: any;
 }
 
@@ -220,28 +220,28 @@ export interface AutotaskContractServiceBundleUnit {
 export interface AutotaskContractRecurringLine {
   source: 'service' | 'bundle';
   lineID: number | undefined;
-  serviceID?: number;
-  serviceBundleID?: number;
+  serviceID?: number | undefined;
+  serviceBundleID?: number | undefined;
   name: string;
-  vendorCompanyID?: number;
-  vendorName?: string;
-  periodType?: number;
-  periodLabel?: string;
+  vendorCompanyID?: number | undefined;
+  vendorName?: string | undefined;
+  periodType?: number | undefined;
+  periodLabel?: string | undefined;
   units: number;
   unitPrice: number;
   unitCost: number;
   periodTotal: number;
   monthlyTotal: number;
   monthlyCost: number;
-  startDate?: string;
-  endDate?: string;
+  startDate?: string | undefined;
+  endDate?: string | undefined;
 }
 
 export interface AutotaskContractRecurringLines {
   contractID: number;
-  contractName?: string;
-  companyID?: number;
-  companyName?: string;
+  contractName?: string | undefined;
+  companyID?: number | undefined;
+  companyName?: string | undefined;
   activeOn: string;
   lines: AutotaskContractRecurringLine[];
   monthlyTotal: number;

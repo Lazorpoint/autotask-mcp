@@ -2233,6 +2233,68 @@ export const TOOL_DEFINITIONS: McpTool[] = [
     }
   },
   {
+    name: 'autotask_search_contract_services',
+    description: 'List the service line items on a contract (ContractServices): which catalog services are on the contract and at what contract-specific unit price. Read-only. Pair with autotask_search_contract_service_units for billed quantities, or use autotask_get_contract_recurring_lines for both in one call.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        contractID: { type: 'number', description: 'Contract ID' },
+        pageSize: { type: 'number', description: 'Max rows (default 100, max 500)', minimum: 1, maximum: 500 }
+      },
+      required: ['contractID']
+    }
+  },
+  {
+    name: 'autotask_search_contract_service_units',
+    description: 'Billed unit rows for a contract (ContractServiceUnits): the quantity and contract price of each service line over a date range. By default returns only rows active today, i.e. what is currently being invoiced. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        contractID: { type: 'number', description: 'Contract ID' },
+        activeOn: { type: 'string', description: 'ISO date (YYYY-MM-DD). Return rows whose start/end range covers this day. Default: today.' },
+        pageSize: { type: 'number', description: 'Max rows (default 200, max 500)', minimum: 1, maximum: 500 }
+      },
+      required: ['contractID']
+    }
+  },
+  {
+    name: 'autotask_search_contract_service_bundles',
+    description: 'List the service-bundle line items on a contract (ContractServiceBundles). Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        contractID: { type: 'number', description: 'Contract ID' },
+        pageSize: { type: 'number', description: 'Max rows (default 100, max 500)', minimum: 1, maximum: 500 }
+      },
+      required: ['contractID']
+    }
+  },
+  {
+    name: 'autotask_search_contract_service_bundle_units',
+    description: 'Billed unit rows for bundle lines on a contract (ContractServiceBundleUnits), active on a given day (default today). Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        contractID: { type: 'number', description: 'Contract ID' },
+        activeOn: { type: 'string', description: 'ISO date (YYYY-MM-DD). Default: today.' },
+        pageSize: { type: 'number', description: 'Max rows (default 200, max 500)', minimum: 1, maximum: 500 }
+      },
+      required: ['contractID']
+    }
+  },
+  {
+    name: 'autotask_get_contract_recurring_lines',
+    description: 'Recurring-revenue roll-up for one contract: every service and bundle line with units active on a day, joined to the catalog (service name, vendor, billing period) and normalized to a monthly total. Returns { contractID, contractName, companyID, companyName, activeOn, lines[], monthlyTotal, monthlyCost, unresolvedPeriodTypes[] }. Use this for MRR, licensing reconciliation, and "what does this client pay for" questions. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        contractID: { type: 'number', description: 'Contract ID' },
+        activeOn: { type: 'string', description: 'ISO date (YYYY-MM-DD) the lines must be active on. Default: today.' }
+      },
+      required: ['contractID']
+    }
+  },
+  {
     name: 'autotask_list_expiring_contracts',
     description: 'List contracts whose end date falls within the next N days (expiring-contracts report). Optionally include already-expired contracts, and scope to one company or the whole org.',
     inputSchema: {
@@ -3179,7 +3241,7 @@ export const TOOL_CATEGORIES: Record<string, { description: string; tools: strin
   },
   financial: {
     description: 'Quotes, quote items, opportunities, invoices, and contracts',
-    tools: ['autotask_get_quote', 'autotask_search_quotes', 'autotask_create_quote', 'autotask_get_quote_item', 'autotask_search_quote_items', 'autotask_create_quote_item', 'autotask_update_quote_item', 'autotask_delete_quote_item', 'autotask_get_opportunity', 'autotask_search_opportunities', 'autotask_create_opportunity', 'autotask_search_invoices', 'autotask_search_contracts', 'autotask_get_contract', 'autotask_list_expiring_contracts', 'autotask_create_contract', 'autotask_create_contracts_bulk', 'autotask_update_contract', 'autotask_create_contract_service', 'autotask_update_contract_service']
+    tools: ['autotask_get_quote', 'autotask_search_quotes', 'autotask_create_quote', 'autotask_get_quote_item', 'autotask_search_quote_items', 'autotask_create_quote_item', 'autotask_update_quote_item', 'autotask_delete_quote_item', 'autotask_get_opportunity', 'autotask_search_opportunities', 'autotask_create_opportunity', 'autotask_search_invoices', 'autotask_search_contracts', 'autotask_get_contract', 'autotask_list_expiring_contracts', 'autotask_search_contract_services', 'autotask_search_contract_service_units', 'autotask_search_contract_service_bundles', 'autotask_search_contract_service_bundle_units', 'autotask_get_contract_recurring_lines', 'autotask_create_contract', 'autotask_create_contracts_bulk', 'autotask_update_contract', 'autotask_create_contract_service', 'autotask_update_contract_service']
   },
   products_and_services: {
     description: 'Products, services, and service bundles catalog',

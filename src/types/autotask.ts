@@ -158,6 +158,97 @@ export interface AutotaskContract {
   [key: string]: any;
 }
 
+/** A service line on a Contract (Autotask entity ContractServices). */
+export interface AutotaskContractService {
+  id?: number;
+  contractID?: number;
+  serviceID?: number;
+  unitPrice?: number;
+  unitCost?: number;
+  internalCurrencyUnitPrice?: number;
+  invoiceDescription?: string;
+  internalDescription?: string;
+  quoteItemID?: number;
+  [key: string]: any;
+}
+
+/** Billed quantity for a contract service line over a date range (ContractServiceUnits). */
+export interface AutotaskContractServiceUnit {
+  id?: number;
+  contractID?: number;
+  contractServiceID?: number;
+  serviceID?: number;
+  units?: number;
+  price?: number;
+  cost?: number;
+  internalCurrencyPrice?: number;
+  startDate?: string;
+  endDate?: string;
+  approveAndPostDate?: string;
+  vendorAccountID?: number;
+  [key: string]: any;
+}
+
+/** A service-bundle line on a Contract (ContractServiceBundles). */
+export interface AutotaskContractServiceBundle {
+  id?: number;
+  contractID?: number;
+  serviceBundleID?: number;
+  unitPrice?: number;
+  unitCost?: number;
+  internalCurrencyUnitPrice?: number;
+  invoiceDescription?: string;
+  internalDescription?: string;
+  [key: string]: any;
+}
+
+/** Billed quantity for a contract bundle line over a date range (ContractServiceBundleUnits). */
+export interface AutotaskContractServiceBundleUnit {
+  id?: number;
+  contractID?: number;
+  contractServiceBundleID?: number;
+  serviceBundleID?: number;
+  units?: number;
+  price?: number;
+  cost?: number;
+  startDate?: string;
+  endDate?: string;
+  [key: string]: any;
+}
+
+/** One recurring line, normalized to a monthly figure, as returned by getContractRecurringLines(). */
+export interface AutotaskContractRecurringLine {
+  source: 'service' | 'bundle';
+  lineID: number | undefined;
+  serviceID?: number;
+  serviceBundleID?: number;
+  name: string;
+  vendorCompanyID?: number;
+  vendorName?: string;
+  periodType?: number;
+  periodLabel?: string;
+  units: number;
+  unitPrice: number;
+  unitCost: number;
+  periodTotal: number;
+  monthlyTotal: number;
+  monthlyCost: number;
+  startDate?: string;
+  endDate?: string;
+}
+
+export interface AutotaskContractRecurringLines {
+  contractID: number;
+  contractName?: string;
+  companyID?: number;
+  companyName?: string;
+  activeOn: string;
+  lines: AutotaskContractRecurringLine[];
+  monthlyTotal: number;
+  monthlyCost: number;
+  unresolvedPeriodTypes: number[];
+}
+
 export interface AutotaskInvoice {
   id?: number;
   companyID?: number;

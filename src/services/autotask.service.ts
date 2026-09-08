@@ -9,6 +9,12 @@
 import { resolveAutotaskApiUrl } from '../utils/config';
 import { AutotaskHttpClient, QueryFilter } from './autotask-http';
 import {
+  AutotaskContractService,
+  AutotaskContractServiceUnit,
+  AutotaskContractServiceBundle,
+  AutotaskContractServiceBundleUnit,
+  AutotaskContractRecurringLine,
+  AutotaskContractRecurringLines,
   AutotaskCompany,
   AutotaskContact,
   AutotaskTicket,
@@ -60,6 +66,10 @@ export const MATCH_ALL: QueryFilter[] = [{ op: 'gte', field: 'id', value: 0 }];
  * `if (options.X !== undefined) filters.push({ op: 'eq', field: 'X', value: options.X })`
  * pattern that was previously duplicated across every search method.
  */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
 function pushEq(filters: QueryFilter[], field: string, value: unknown): void {
   if (value !== undefined) {
     filters.push({ op: 'eq', field, value });
@@ -1006,6 +1016,220 @@ export class AutotaskService {
       this.logger.error('Failed to search contracts:', error);
       throw error;
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Contract service lines and billed units (read-only)
+  // ---------------------------------------------------------------------------
+
+  /** Service lines on a contract (ContractServices). */
+  async searchContractServices(options: { contractID: number; pageSize?: number }): Promise<AutotaskContractService[]> {
+    const http = await this.ensureClient();
+    try {
+      const filters: QueryFilter[] = [{ op: 'eq', field: 'contractID', value: options.contractID }];
+      const pageSize = Math.min(options.pageSize || 100, 500);
+      return await http.query<AutotaskContractService>('ContractServices', filters, { maxRecords: pageSize });
+    } catch (error) {
+      this.logger.error(`Failed to search contract services for contract ${options.contractID}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Billed unit rows for a contract (ContractServiceUnits). With `activeOn`
+   * (ISO date, default today) only rows whose date range covers that day are
+   * returned, which is the quantity currently being invoiced.
+   */
+  async searchContractServiceUnits(options: { contractID: number; activeOn?: string; pageSize?: number }): Promise<AutotaskContractServiceUnit[]> {
+    const http = await this.ensureClient();
+    try {
+      const filters = this.unitDateFilters(options.contractID, options.activeOn);
+      const pageSize = Math.min(options.pageSize || 200, 500);
+      return await http.query<AutotaskContractServiceUnit>('ContractServiceUnits', filters, { maxRecords: pageSize });
+    } catch (error) {
+      this.logger.error(`Failed to search contract service units for contract ${options.contractID}:`, error);
+      throw error;
+    }
+  }
+
+  /** Service-bundle lines on a contract (ContractServiceBundles). */
+  async searchContractServiceBundles(options: { contractID: number; pageSize?: number }): Promise<AutotaskContractServiceBundle[]> {
+    const http = await this.ensureClient();
+    try {
+      const filters: QueryFilter[] = [{ op: 'eq', field: 'contractID', value: options.contractID }];
+      const pageSize = Math.min(options.pageSize || 100, 500);
+      return await http.query<AutotaskContractServiceBundle>('ContractServiceBundles', filters, { maxRecords: pageSize });
+    } catch (error) {
+      this.logger.error(`Failed to search contract service bundles for contract ${options.contractID}:`, error);
+      throw error;
+    }
+  }
+
+  /** Billed unit rows for bundle lines (ContractServiceBundleUnits), same date semantics as service units. */
+  async searchContractServiceBundleUnits(options: { contractID: number; activeOn?: string; pageSize?: number }): Promise<AutotaskContractServiceBundleUnit[]> {
+    const http = await this.ensureClient();
+    try {
+      const filters = this.unitDateFilters(options.contractID, options.activeOn);
+      const pageSize = Math.min(options.pageSize || 200, 500);
+      return await http.query<AutotaskContractServiceBundleUnit>('ContractServiceBundleUnits', filters, { maxRecords: pageSize });
+    } catch (error) {
+      this.logger.error(`Failed to search contract service bundle units for contract ${options.contractID}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * One call per contract for recurring-revenue reporting: every service and
+   * bundle line with units active on `activeOn`, joined to the catalog for
+   * names, vendors and billing period, and normalized to a monthly total.
+   * Lines whose period type cannot be resolved keep periodTotal as the monthly
+   * figure and are listed in `unresolvedPeriodTypes` rather than being guessed.
+   */
+  async getContractRecurringLines(options: { contractID: number; activeOn?: string }): Promise<AutotaskContractRecurringLines> {
+    const activeOn = options.activeOn || new Date().toISOString().slice(0, 10);
+    const [contract, serviceLines, serviceUnits, bundleLines, bundleUnits] = await Promise.all([
+      this.getContract(options.contractID),
+      this.searchContractServices({ contractID: options.contractID, pageSize: 500 }),
+      this.searchContractServiceUnits({ contractID: options.contractID, activeOn, pageSize: 500 }),
+      this.searchContractServiceBundles({ contractID: options.contractID, pageSize: 500 }).catch(() => [] as AutotaskContractServiceBundle[]),
+      this.searchContractServiceBundleUnits({ contractID: options.contractID, activeOn, pageSize: 500 }).catch(() => [] as AutotaskContractServiceBundleUnit[]),
+    ]);
+
+    const periodLabels = await this.servicePeriodLabels();
+    const unresolved = new Set<number>();
+    const lines: AutotaskContractRecurringLine[] = [];
+
+    const serviceById = new Map<number, AutotaskContractService>();
+    for (const l of serviceLines) if (l.id != null) serviceById.set(l.id, l);
+    const bundleById = new Map<number, AutotaskContractServiceBundle>();
+    for (const l of bundleLines) if (l.id != null) bundleById.set(l.id, l);
+
+    const serviceIDs = Array.from(new Set(serviceUnits
+      .map(u => u.serviceID ?? serviceById.get(u.contractServiceID as number)?.serviceID)
+      .filter((x): x is number => x != null)));
+    const bundleIDs = Array.from(new Set(bundleUnits
+      .map(u => u.serviceBundleID ?? bundleById.get(u.contractServiceBundleID as number)?.serviceBundleID)
+      .filter((x): x is number => x != null)));
+
+    const catalog = new Map<number, any>();
+    await Promise.all(serviceIDs.map(async id => {
+      try { const svc = await this.getService(id); if (svc) catalog.set(id, svc); } catch { /* leave unresolved */ }
+    }));
+    const bundles = new Map<number, any>();
+    await Promise.all(bundleIDs.map(async id => {
+      try { const b = await this.getServiceBundle(id); if (b) bundles.set(id, b); } catch { /* leave unresolved */ }
+    }));
+    const vendorIDs = Array.from(new Set(Array.from(catalog.values())
+      .map(c => c.vendorCompanyID).filter((x): x is number => x != null)));
+    const vendors = new Map<number, string>();
+    await Promise.all(vendorIDs.map(async id => {
+      try { const c = await this.getCompany(id); if (c?.companyName) vendors.set(id, c.companyName); } catch { /* optional */ }
+    }));
+
+    const monthlyFactor = (periodType?: number): number | null => {
+      if (periodType == null) return null;
+      const label = (periodLabels.get(periodType) || '').toLowerCase();
+      if (/semi/.test(label)) return 1 / 6;
+      if (/quarter/.test(label)) return 1 / 3;
+      if (/annual|year/.test(label)) return 1 / 12;
+      if (/month/.test(label)) return 1;
+      if (/week/.test(label)) return 52 / 12;
+      if (/one[- ]?time/.test(label)) return 0;
+      return null;
+    };
+
+    for (const u of serviceUnits) {
+      const line = serviceById.get(u.contractServiceID as number);
+      const serviceID = u.serviceID ?? line?.serviceID;
+      const svc = serviceID != null ? catalog.get(serviceID) : undefined;
+      const units = Number(u.units ?? 0);
+      const unitPrice = Number(u.price ?? line?.unitPrice ?? svc?.unitPrice ?? 0);
+      const unitCost = Number(u.cost ?? line?.unitCost ?? svc?.unitCost ?? 0);
+      const factor = monthlyFactor(svc?.periodType);
+      if (factor === null && svc?.periodType != null) unresolved.add(svc.periodType);
+      const periodTotal = round2(units * unitPrice);
+      lines.push({
+        source: 'service',
+        lineID: line?.id ?? u.contractServiceID,
+        serviceID,
+        name: svc?.name ?? line?.invoiceDescription ?? `Service ${serviceID}`,
+        vendorCompanyID: svc?.vendorCompanyID,
+        vendorName: svc?.vendorCompanyID != null ? vendors.get(svc.vendorCompanyID) : undefined,
+        periodType: svc?.periodType,
+        periodLabel: svc?.periodType != null ? periodLabels.get(svc.periodType) : undefined,
+        units, unitPrice, unitCost, periodTotal,
+        monthlyTotal: round2(periodTotal * (factor ?? 1)),
+        monthlyCost: round2(units * unitCost * (factor ?? 1)),
+        startDate: u.startDate, endDate: u.endDate,
+      });
+    }
+    for (const u of bundleUnits) {
+      const line = bundleById.get(u.contractServiceBundleID as number);
+      const serviceBundleID = u.serviceBundleID ?? line?.serviceBundleID;
+      const b = serviceBundleID != null ? bundles.get(serviceBundleID) : undefined;
+      const units = Number(u.units ?? 0);
+      const unitPrice = Number(u.price ?? line?.unitPrice ?? b?.unitPrice ?? 0);
+      const unitCost = Number(u.cost ?? line?.unitCost ?? b?.unitCost ?? 0);
+      const factor = monthlyFactor(b?.periodType);
+      if (factor === null && b?.periodType != null) unresolved.add(b.periodType);
+      const periodTotal = round2(units * unitPrice);
+      lines.push({
+        source: 'bundle',
+        lineID: line?.id ?? u.contractServiceBundleID,
+        serviceBundleID,
+        name: b?.name ?? line?.invoiceDescription ?? `Bundle ${serviceBundleID}`,
+        periodType: b?.periodType,
+        periodLabel: b?.periodType != null ? periodLabels.get(b.periodType) : undefined,
+        units, unitPrice, unitCost, periodTotal,
+        monthlyTotal: round2(periodTotal * (factor ?? 1)),
+        monthlyCost: round2(units * unitCost * (factor ?? 1)),
+        startDate: u.startDate, endDate: u.endDate,
+      });
+    }
+
+    lines.sort((a, b) => b.monthlyTotal - a.monthlyTotal || a.name.localeCompare(b.name));
+    let companyName: string | undefined;
+    if (contract?.companyID != null) {
+      try { companyName = (await this.getCompany(contract.companyID))?.companyName; } catch { /* optional */ }
+    }
+    return {
+      contractID: options.contractID,
+      contractName: contract?.contractName,
+      companyID: contract?.companyID,
+      companyName,
+      activeOn,
+      lines,
+      monthlyTotal: round2(lines.reduce((a, l) => a + l.monthlyTotal, 0)),
+      monthlyCost: round2(lines.reduce((a, l) => a + l.monthlyCost, 0)),
+      unresolvedPeriodTypes: Array.from(unresolved).sort((a, b) => a - b),
+    };
+  }
+
+  private unitDateFilters(contractID: number, activeOn?: string): QueryFilter[] {
+    const day = activeOn || new Date().toISOString().slice(0, 10);
+    return [
+      { op: 'eq', field: 'contractID', value: contractID },
+      { op: 'lte', field: 'startDate', value: `${day}T23:59:59` },
+      { op: 'gte', field: 'endDate', value: `${day}T00:00:00` },
+    ];
+  }
+
+  private periodLabelCache: Map<number, string> | null = null;
+  private async servicePeriodLabels(): Promise<Map<number, string>> {
+    if (this.periodLabelCache) return this.periodLabelCache;
+    const map = new Map<number, string>();
+    try {
+      const fields = await this.getFieldInfo('Services');
+      const pt = fields.find(f => f.name === 'periodType');
+      for (const pv of pt?.picklistValues || []) {
+        const v = Number((pv as any).value);
+        if (!Number.isNaN(v)) map.set(v, String((pv as any).label ?? ''));
+      }
+    } catch (error) {
+      this.logger.warn('Could not load Services.periodType picklist; monthly normalization will be skipped', error);
+    }
+    this.periodLabelCache = map;
+    return map;
   }
 
   /**

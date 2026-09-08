@@ -1084,6 +1084,26 @@ export class AutotaskToolHandler {
       ['autotask_get_contract', async (a) => {
         const r = await s.getContract(a.id); return { result: r, message: `Retrieved contract ${a.id}` };
       }],
+      ['autotask_search_contract_services', async (a) => {
+        const r = await s.searchContractServices({ contractID: a.contractID, pageSize: a.pageSize });
+        return { result: r, message: `Found ${r.length} service lines on contract ${a.contractID}` };
+      }],
+      ['autotask_search_contract_service_units', async (a) => {
+        const r = await s.searchContractServiceUnits({ contractID: a.contractID, activeOn: a.activeOn, pageSize: a.pageSize });
+        return { result: r, message: `Found ${r.length} unit rows on contract ${a.contractID}${a.activeOn ? ` active on ${a.activeOn}` : ' active today'}` };
+      }],
+      ['autotask_search_contract_service_bundles', async (a) => {
+        const r = await s.searchContractServiceBundles({ contractID: a.contractID, pageSize: a.pageSize });
+        return { result: r, message: `Found ${r.length} bundle lines on contract ${a.contractID}` };
+      }],
+      ['autotask_search_contract_service_bundle_units', async (a) => {
+        const r = await s.searchContractServiceBundleUnits({ contractID: a.contractID, activeOn: a.activeOn, pageSize: a.pageSize });
+        return { result: r, message: `Found ${r.length} bundle unit rows on contract ${a.contractID}` };
+      }],
+      ['autotask_get_contract_recurring_lines', async (a) => {
+        const r = await s.getContractRecurringLines({ contractID: a.contractID, activeOn: a.activeOn });
+        return { result: r, message: `${r.lines.length} recurring lines on contract ${a.contractID}, $${r.monthlyTotal.toFixed(2)}/month as of ${r.activeOn}` };
+      }],
       ['autotask_list_expiring_contracts', async (a) => {
         const r = await s.listExpiringContracts(a);
         return { result: r, message: `Found ${r.length} contracts with end dates within ${a.daysAhead ?? 60} days` };

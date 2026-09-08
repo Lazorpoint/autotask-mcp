@@ -1178,7 +1178,7 @@ export class AutotaskService {
       u: AutotaskContractServiceUnit | AutotaskContractServiceBundleUnit,
       line: { id?: number; unitPrice?: number; unitCost?: number; invoiceDescription?: string; internalDescription?: string } | undefined,
       cat: { name?: string; unitPrice?: number; unitCost?: number; periodType?: number; vendorCompanyID?: number } | undefined,
-      ids: { serviceID?: number; serviceBundleID?: number; lineID: number | undefined },
+      ids: { serviceID?: number | undefined; serviceBundleID?: number | undefined; lineID: number | undefined },
     ): AutotaskContractRecurringLine => {
       const units = Number(u.units ?? 0);
       const catalogRate = firstPositive(line?.unitPrice, cat?.unitPrice);

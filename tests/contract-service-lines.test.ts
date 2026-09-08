@@ -258,3 +258,137 @@ describe('getContractRecurringLines roll-up', () => {
     expect(result.activeOn).toBe(new Date().toISOString().slice(0, 10));
   });
 });
+
+// Regression tests for the price-basis fix. ContractServiceUnits.price is the
+// EXTENDED line amount on our tenant, not a per-unit rate — the original
+// roll-up multiplied by units a second time and reported AIC at $5,883.50/mo
+// against a real ~$482.60. The numbers below are the live AIC rows
+// (contract 29747643) and their catalog rates.
+describe('getContractRecurringLines price basis', () => {
+  const AIC_ROWS = [
+    { serviceID: 45,  units: 11, price: 254.10, catalogRate: 23.10, name: 'Microsoft 365 Business Premium - A|M' },
+    { serviceID: 134, units: 17, price: 63.75,  catalogRate: 3.75,  name: 'AvePoint Microsoft 365 Migration FLY (Server) M|M' },
+    { serviceID: 38,  units: 4,  price: 16.80,  catalogRate: 4.20,  name: 'Exchange Online (Plan 1)  - A|M' },
+    { serviceID: 57,  units: 1,  price: 9.45,   catalogRate: 9.45,  name: 'Service 57' },
+    { serviceID: 33,  units: 13, price: 32.50,  catalogRate: 2.50,  name: 'DNS Security Service Licensing - Umbrella - M|M' },
+    { serviceID: 78,  units: 15, price: 63.75,  catalogRate: 4.25,  name: 'Service 78' },
+    { serviceID: 41,  units: 13, price: 42.25,  catalogRate: 3.25,  name: 'Service 41' },
+  ];
+
+  const aicService = () => {
+    const service = new AutotaskService(mockConfig, mockLogger);
+    jest.spyOn(service, 'getContract').mockResolvedValue({
+      id: 29747643, contractName: 'AIC - Cloud Services', companyID: 29746549,
+    } as any);
+    jest.spyOn(service, 'getFieldInfo').mockResolvedValue([PERIOD_TYPE_FIELD] as any);
+    jest.spyOn(service, 'getCompany').mockResolvedValue({ id: 1, companyName: 'Advanced Industrial Coatings (AIC)' } as any);
+    jest.spyOn(service, 'searchContractServiceBundles').mockResolvedValue([] as any);
+    jest.spyOn(service, 'searchContractServiceBundleUnits').mockResolvedValue([] as any);
+    jest.spyOn(service, 'searchContractServices').mockResolvedValue(
+      AIC_ROWS.map((r, i) => ({ id: 900 + i, serviceID: r.serviceID, unitPrice: r.catalogRate, invoiceDescription: '' })) as any
+    );
+    jest.spyOn(service, 'searchContractServiceUnits').mockResolvedValue(
+      AIC_ROWS.map((r, i) => ({ id: i, contractServiceID: 900 + i, serviceID: r.serviceID, units: r.units, price: r.price, cost: 0 })) as any
+    );
+    jest.spyOn(service, 'getService').mockImplementation(async (id: number) => {
+      const r = AIC_ROWS.find(x => x.serviceID === id)!;
+      return { id, name: r.name.startsWith('Service ') ? '' : r.name, unitPrice: r.catalogRate, unitCost: 0, periodType: 2 } as any;
+    });
+    jest.spyOn(service, 'getServiceBundle').mockResolvedValue(null as any);
+    return service;
+  };
+
+  test('reads price as the extended line amount and totals AIC at 482.60, not 5883.50', async () => {
+    const result = await aicService().getContractRecurringLines({ contractID: 29747643, activeOn: '2026-09-08' });
+
+    expect(result.monthlyTotal).toBe(482.60);
+    expect(result.monthlyTotal).not.toBe(5883.50);
+    expect(result.lines.every(l => l.priceBasis === 'extended')).toBe(true);
+    expect(result.assumedExtendedLines).toBe(0);
+  });
+
+  test('derives the per-unit price from the extended amount', async () => {
+    const result = await aicService().getContractRecurringLines({ contractID: 29747643, activeOn: '2026-09-08' });
+    const bp = result.lines.find(l => l.serviceID === 45)!;
+
+    expect(bp.units).toBe(11);
+    expect(bp.periodTotal).toBe(254.10);
+    expect(bp.unitPrice).toBe(23.10);
+    expect(bp.monthlyTotal).toBe(254.10);
+  });
+
+  test('a genuinely per-unit row is not doubled', async () => {
+    const service = new AutotaskService(mockConfig, mockLogger);
+    jest.spyOn(service, 'getContract').mockResolvedValue({ id: 1, companyID: 2 } as any);
+    jest.spyOn(service, 'getFieldInfo').mockResolvedValue([PERIOD_TYPE_FIELD] as any);
+    jest.spyOn(service, 'getCompany').mockResolvedValue({ id: 2, companyName: 'X' } as any);
+    jest.spyOn(service, 'searchContractServiceBundles').mockResolvedValue([] as any);
+    jest.spyOn(service, 'searchContractServiceBundleUnits').mockResolvedValue([] as any);
+    jest.spyOn(service, 'searchContractServices').mockResolvedValue([{ id: 900, serviceID: 45, unitPrice: 23.10 }] as any);
+    // price equals the catalog rate while units > 1 -> per-unit, so extend it.
+    jest.spyOn(service, 'searchContractServiceUnits').mockResolvedValue([
+      { id: 1, contractServiceID: 900, serviceID: 45, units: 11, price: 23.10, cost: 0 },
+    ] as any);
+    jest.spyOn(service, 'getService').mockResolvedValue({ id: 45, name: 'BP', unitPrice: 23.10, periodType: 2 } as any);
+    jest.spyOn(service, 'getServiceBundle').mockResolvedValue(null as any);
+
+    const result = await service.getContractRecurringLines({ contractID: 1, activeOn: '2026-09-08' });
+
+    expect(result.lines[0].priceBasis).toBe('per-unit');
+    expect(result.lines[0].periodTotal).toBe(254.10);
+    expect(result.monthlyTotal).toBe(254.10);
+  });
+
+  test('no catalog match is flagged assumed-extended and counted', async () => {
+    const service = new AutotaskService(mockConfig, mockLogger);
+    jest.spyOn(service, 'getContract').mockResolvedValue({ id: 1, companyID: 2 } as any);
+    jest.spyOn(service, 'getFieldInfo').mockResolvedValue([PERIOD_TYPE_FIELD] as any);
+    jest.spyOn(service, 'getCompany').mockResolvedValue({ id: 2, companyName: 'X' } as any);
+    jest.spyOn(service, 'searchContractServiceBundles').mockResolvedValue([] as any);
+    jest.spyOn(service, 'searchContractServiceBundleUnits').mockResolvedValue([] as any);
+    jest.spyOn(service, 'searchContractServices').mockResolvedValue([{ id: 900, serviceID: 77 }] as any);
+    jest.spyOn(service, 'searchContractServiceUnits').mockResolvedValue([
+      { id: 1, contractServiceID: 900, serviceID: 77, units: 5, price: 100, cost: 0 },
+    ] as any);
+    jest.spyOn(service, 'getService').mockResolvedValue(null as any);
+    jest.spyOn(service, 'getServiceBundle').mockResolvedValue(null as any);
+
+    const result = await service.getContractRecurringLines({ contractID: 1, activeOn: '2026-09-08' });
+
+    expect(result.lines[0].priceBasis).toBe('assumed-extended');
+    expect(result.lines[0].periodTotal).toBe(100);
+    expect(result.assumedExtendedLines).toBe(1);
+  });
+
+  test('name falls through an empty catalog name and empty invoiceDescription', async () => {
+    const result = await aicService().getContractRecurringLines({ contractID: 29747643, activeOn: '2026-09-08' });
+
+    expect(result.lines.every(l => l.name.trim() !== '')).toBe(true);
+    expect(result.lines.find(l => l.serviceID === 57)!.name).toBe('Service 57');
+    expect(result.lines.find(l => l.serviceID === 45)!.name).toBe('Microsoft 365 Business Premium - A|M');
+  });
+
+  test('unitCost falls through a zero unit-row cost to the catalog rate', async () => {
+    const service = aicService();
+    jest.spyOn(service, 'getService').mockImplementation(async (id: number) => (
+      { id, name: 'Exchange Online (Plan 1)  - A|M', unitPrice: 4.20, unitCost: 3.36, periodType: 2 } as any
+    ));
+    jest.spyOn(service, 'searchContractServices').mockResolvedValue([{ id: 900, serviceID: 38, unitPrice: 4.20 }] as any);
+    jest.spyOn(service, 'searchContractServiceUnits').mockResolvedValue([
+      { id: 1, contractServiceID: 900, serviceID: 38, units: 4, price: 16.80, cost: 0 },
+    ] as any);
+
+    const result = await service.getContractRecurringLines({ contractID: 29747643, activeOn: '2026-09-08' });
+
+    expect(result.lines[0].unitCost).toBe(3.36);
+    expect(result.lines[0].monthlyCost).toBe(13.44);
+  });
+
+  test('a rate-limit error surfaces instead of degrading into blank rows', async () => {
+    const service = aicService();
+    jest.spyOn(service, 'getService').mockRejectedValue(new Error('Autotask API threshold exceeded (HTTP 429)'));
+
+    await expect(service.getContractRecurringLines({ contractID: 29747643, activeOn: '2026-09-08' }))
+      .rejects.toThrow(/429/);
+  });
+});

@@ -905,7 +905,7 @@ export const TOOL_DEFINITIONS: McpTool[] = [
   // Time entry tools
   {
     name: 'autotask_create_time_entry',
-    description: 'Create a time entry in Autotask. Can be tied to a ticket, task, or project, OR created as "Regular Time" (no parent) for meetings, admin work, etc. For Regular Time, specify a category like "Internal Meeting", "Office Management", "Training", etc.',
+    description: 'Create a time entry in Autotask. Can be tied to a ticket or task, OR created as "Regular Time" (no parent) for meetings, admin work, etc. For Regular Time, specify a category like "Internal Meeting", "Office Management", "Training", etc.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -917,10 +917,6 @@ export const TOOL_DEFINITIONS: McpTool[] = [
           type: 'number',
           description: 'Task ID for the time entry (for project work, omit for Regular Time)'
         },
-        projectID: {
-          type: 'number',
-          description: 'Project ID for the time entry (omit for Regular Time)'
-        },
         resourceID: {
           type: 'number',
           description: 'Resource ID (user) logging the time. Can be omitted if resourceName is provided.'
@@ -931,7 +927,7 @@ export const TOOL_DEFINITIONS: McpTool[] = [
         },
         category: {
           type: 'string',
-          description: 'Category name for Regular Time entries (e.g., "Internal Meeting", "Office Management", "Training", "Research", "HR/Recruiting", "Travel Time", "Holiday", "PTO"). Required for Regular Time entries (when no ticket/task/project is specified).'
+          description: 'Category name for Regular Time entries (e.g., "Internal Meeting", "Office Management", "Training", "Research", "HR/Recruiting", "Travel Time", "Holiday", "PTO"). Required for Regular Time entries (when neither ticketID nor taskID is specified).'
         },
         dateWorked: {
           type: 'string',
@@ -2621,7 +2617,7 @@ export const TOOL_DEFINITIONS: McpTool[] = [
   // Time Entries search tool
   {
     name: 'autotask_search_time_entries',
-    description: 'Search for time entries in Autotask. Returns 25 results per page by default. Time entries can be filtered by resource, ticket, project, task, date range, or approval status. Use approvalStatus="unapproved" to find entries not yet posted. Common fan-out target — scope by date range first to avoid Autotask\'s API threshold.',
+    description: 'Search for time entries in Autotask. Returns 25 results per page by default. Time entries can be filtered by resource, ticket, task, date range, or approval status. Use approvalStatus="unapproved" to find entries not yet posted. There is no project filter — Autotask time entries have no project field; to get a project\'s time, call autotask_search_tasks with that projectID and filter by the returned taskId values. Common fan-out target — scope by date range first to avoid Autotask\'s API threshold.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2632,10 +2628,6 @@ export const TOOL_DEFINITIONS: McpTool[] = [
         ticketId: {
           type: 'number',
           description: 'Filter by ticket ID'
-        },
-        projectId: {
-          type: 'number',
-          description: 'Filter by project ID'
         },
         taskId: {
           type: 'number',

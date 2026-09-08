@@ -652,28 +652,11 @@ export class AutotaskService {
     try {
       this.logger.debug('Creating time entry:', timeEntry);
 
-      // Ticket-scoped
-      if (timeEntry.ticketID) {
-        const id = await http.childCreate('Tickets', timeEntry.ticketID, 'TimeEntries', timeEntry);
-        this.logger.info(`Time entry created with ID: ${id}`);
-        return id;
-      }
-      // Task-scoped
-      if (timeEntry.taskID) {
-        const id = await http.childCreate('Tasks', timeEntry.taskID, 'TimeEntries', timeEntry);
-        this.logger.info(`Time entry created with ID: ${id}`);
-        return id;
-      }
-      // Project-scoped
-      if (timeEntry.projectID) {
-        const id = await http.childCreate('Projects', timeEntry.projectID, 'TimeEntries', timeEntry);
-        this.logger.info(`Time entry created with ID: ${id}`);
-        return id;
-      }
-      // Regular (no parent — meetings, admin, etc.)
-      // Autotask accepts a POST /TimeEntries with no parent for regular entries.
+      // Do not reintroduce child routes here: POST /Tickets/{id}/TimeEntries and
+      // POST /Tasks/{id}/TimeEntries do not exist and 404 (issue #277). The
+      // parent travels in the payload as ticketID or taskID.
       const id = await http.create('TimeEntries', timeEntry);
-      this.logger.info(`Regular time entry created with ID: ${id}`);
+      this.logger.info(`Time entry created with ID: ${id}`);
       return id;
     } catch (error) {
       this.logger.error('Failed to create time entry:', error);
@@ -2297,9 +2280,8 @@ export class AutotaskService {
       if ((options as any).ticketId !== undefined) {
         filters.push({ op: 'eq', field: 'ticketID', value: (options as any).ticketId });
       }
-      if ((options as any).projectId !== undefined) {
-        filters.push({ op: 'eq', field: 'projectID', value: (options as any).projectId });
-      }
+      // No projectID filter: TimeEntries has no such field (issue #277), so the
+      // clause could only be dropped or rejected by Autotask — never honoured.
       if ((options as any).taskId !== undefined) {
         filters.push({ op: 'eq', field: 'taskID', value: (options as any).taskId });
       }

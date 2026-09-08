@@ -964,6 +964,10 @@ export class AutotaskToolHandler {
 
       // Time entries
       ['autotask_create_time_entry', async (a) => {
+        // projectID was advertised until #278, so stale callers still send it.
+        if (a.projectID !== undefined) {
+          throw new Error(`Autotask time entries cannot be logged against a project. Log the time against a task within project ${a.projectID} (taskID), against a ticket (ticketID), or omit both for Regular Time.`);
+        }
         // If no resource specified at all, prompt the user
         if (!a.resourceID && !a.resourceName) {
           return { result: null, message: 'Please specify who is logging this time. Provide a resourceName (e.g., "Will Spence") or resourceID.' };
@@ -977,8 +981,8 @@ export class AutotaskToolHandler {
           a.resourceID = resource.id;
           delete a.resourceName;
         }
-        // For Regular Time entries (no ticket/task/project), handle category
-        const isRegularTime = !a.ticketID && !a.taskID && !a.projectID;
+        // For Regular Time entries (no ticket/task), handle category
+        const isRegularTime = !a.ticketID && !a.taskID;
         if (isRegularTime) {
           if (!a.category && !a.internalBillingCodeID) {
             // List available categories and prompt user
@@ -1421,10 +1425,14 @@ export class AutotaskToolHandler {
 
       // Time Entries
       ['autotask_search_time_entries', async (a) => {
+        // projectId was advertised until #277. Silently ignoring it would return
+        // every time entry looking like a filtered result, so reject it instead.
+        if (a.projectId !== undefined) {
+          throw new Error(`Autotask time entries have no project field, so they cannot be filtered by project. Call autotask_search_tasks with projectID ${a.projectId}, then search time entries by the taskId values it returns.`);
+        }
         const r = await s.searchTimeEntries({
           resourceId: a.resourceId,
           ticketId: a.ticketId,
-          projectId: a.projectId,
           taskId: a.taskId,
           approvalStatus: a.approvalStatus,
           billable: a.billable,

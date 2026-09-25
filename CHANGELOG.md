@@ -2,6 +2,7 @@
 
 ### Added
 
+- **`autotask_update_opportunity`**. Opportunities could be created and read but not changed, so a deal's stage, status, revenue, cost or custom fields could only be corrected in the Autotask UI. The new tool PATCHes `/Opportunities` with only the fields provided. It exposes the per-period revenue and cost fields (`onetimeRevenue`, `monthlyCost`, …) alongside `amount`/`cost`, and takes `userDefinedFields`. Verified live: Autotask derives the totals from the per-period fields, and setting `amount` or `cost` directly collapses the breakdown into one-time and clears recurring revenue/cost, so the schema steers callers to the per-period fields. `useQuoteTotals: true` is accepted even with no quote attached and zeroes every revenue and cost field; the schema says so. Zero is kept as a real value (status 0 is Not Ready To Buy), the `ownerResourceId`/`contactId` spellings from `autotask_create_opportunity` are accepted, and a call with no updatable fields fails before reaching Autotask.
 - **Contract service lines and billed units (read-only)**. Five tools close the gap between a contract header and what is actually invoiced:
   - `autotask_search_contract_services` / `autotask_search_contract_service_bundles` — the service and bundle line items on a contract, with contract-specific unit price.
   - `autotask_search_contract_service_units` / `autotask_search_contract_service_bundle_units` — the billed quantity and price per line over a date range, defaulting to rows active today.
